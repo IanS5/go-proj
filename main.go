@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io/ioutil"
@@ -134,6 +135,10 @@ func ResticRepos() []string {
 // Root gets proj's root directory
 func Root() string {
 	return getenvOr("PROJ_ROOT_DIR", path.Join(os.Getenv("HOME"), ".proj"))
+}
+
+func HistDir() string {
+	return getenvOr("PROJ_HIST_DIR", path.Join(Root(), ".hist"))
 }
 
 // Directory gets the resource's root directory
@@ -321,6 +326,53 @@ func (rc Resource) Restore(name string) (err error) {
 
 }
 
+func (rc Resource) String() string {
+	switch rc {
+	case Template:
+		return "Template"
+	case Project:
+		return "Project"
+	default:
+		return "?"
+	}
+}
+
+func (rc Resource) Id(name string) string {
+	out := strings.Builder{}
+	encoder := base64.NewEncoder(base64.StdEncoding, &out)
+	encoder.Write([]byte(rc.String()))
+	encoder.Write([]byte("##"))
+	encoder.Write([]byte(name))
+	return out.String()
+}
+
+func (rc Resource) HistFile(name string) string {
+	return path.Join(HistDir(), rc.Id(name))
+}
+
+func modEnviron(newVars map[string]string) []string {
+	env := os.Environ()
+	env2 := env
+	env = env[:0]
+
+	for _, v := range env2 {
+		for newVar, newVal := range newVars {
+			if len(newVar) < len(v) && strings.HasPrefix(newVar, v) && v[len(newVar)] == '=' {
+				env = append(env, newVar+"="+newVal)
+				delete(newVars, newVar)
+				break
+			}
+		}
+		env = append(env, v)
+	}
+
+	for newVar, newVal := range newVars {
+		env = append(env, newVar+"="+newVal)
+	}
+
+	return env
+}
+
 // Visit a resource instance
 func (rc Resource) Visit(name string) (err error) {
 	shell := os.Getenv("SHELL")
@@ -352,15 +404,13 @@ func (rc Resource) Visit(name string) (err error) {
 		baseEnvVar = "PROJ_CURRENT_TEMPLATE_BASE"
 		nameEnvVar = "PROJ_CURRENT_TEMPLATE_NAME"
 	}
-	env := os.Environ()
-	env2 := env
-	env = env[:0]
 
-	for _, v := range env2 {
-		if !strings.HasPrefix(v, baseEnvVar+"=") && !strings.HasPrefix(v, nameEnvVar+"=") {
-			env = append(env, v)
-		}
-	}
+	env := modEnviron(map[string]string{
+		baseEnvVar:     instancePath,
+		nameEnvVar:     name,
+		"HISTFILE":     rc.HistFile(name),
+		"fish_history": rc.Id(name),
+	})
 
 	err = os.Chdir(instancePath)
 	if err != nil {
@@ -368,13 +418,7 @@ func (rc Resource) Visit(name string) (err error) {
 	}
 
 	clearScreen()
-	err = syscall.Exec(
-		shell,
-		[]string{invokedExe},
-		append(env,
-			baseEnvVar+"="+instancePath,
-			nameEnvVar+"="+name))
-	return
+	return syscall.Exec(shell, []string{invokedExe}, env)
 }
 
 func main() {
