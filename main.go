@@ -37,17 +37,20 @@ var (
 
 // Flags is a structure containing all the CLI flags and Args
 type Flags struct {
-	Target       Resource
-	RcName       string
+	Target Resource
+
+	ResourceName string
 	TemplateName string
-	Create       bool
-	List         bool
-	Remove       bool
-	Backup       bool
-	Restore      bool
-	Visit        bool
+
+	Create  bool
+	List    bool
+	Remove  bool
+	Backup  bool
+	Restore bool
+	Visit   bool
 }
 
+// getenvOr gets an environment variable or returns a default value if the variable was not set
 func getenvOr(env string, dflt string) string {
 	v := os.Getenv(env)
 	if v == "" {
@@ -57,11 +60,13 @@ func getenvOr(env string, dflt string) string {
 
 }
 
+// clearScreen clears the screen
 func clearScreen() {
 	// TODO: support windows CMD.EXE
 	print("\033[2J\033[H")
 }
 
+// imax is an integer max function
 func imax(x, y int) int {
 	if x > y {
 		return x
@@ -70,6 +75,7 @@ func imax(x, y int) int {
 	return y
 }
 
+// confirm some action, ask the user to input y/n.
 func confirm(question string, args ...interface{}) bool {
 	fmt.Printf("%s [Y/n] ", fmt.Sprintf(question, args...))
 	response := ""
@@ -82,6 +88,7 @@ func confirm(question string, args ...interface{}) bool {
 	}
 }
 
+// Ask the user to pick one of several options, return the one they picked
 func choose(question string, options []string, args ...interface{}) (choice string, err error) {
 	optionStr := strings.Builder{}
 	optionStr.Grow(12)
@@ -102,7 +109,7 @@ func choose(question string, options []string, args ...interface{}) (choice stri
 	fmt.Printf("%s [%s] ", fmt.Sprintf(question, args...), optionStr.String())
 	response := ""
 	fmt.Scanln(&response)
-	option, err := strconv.Atoi(response)
+	option, err := strconv.Atoi(strings.Trim(response, "\t\r\n\v "))
 	if err != nil {
 		return
 	}
@@ -114,6 +121,7 @@ func choose(question string, options []string, args ...interface{}) (choice stri
 	return options[option-1], err
 }
 
+// ResticRepos lissts the user's restic repositories
 func ResticRepos() []string {
 	r := os.Getenv("PROJ_RESTIC_REPOS")
 	if r != "" {
@@ -128,6 +136,7 @@ func Root() string {
 	return getenvOr("PROJ_ROOT_DIR", path.Join(os.Getenv("HOME"), ".proj"))
 }
 
+// Directory gets the resource's root directory
 func (rc Resource) Directory() string {
 	switch rc {
 	case Project:
@@ -158,7 +167,7 @@ func (rc Resource) Create(name string, template string) (err error) {
 
 		err = copy.Copy(tmpl, p)
 	} else {
-		err = os.Mkdir(p, 0655)
+		err = os.Mkdir(p, 0755)
 	}
 
 	if err != nil {
@@ -167,7 +176,8 @@ func (rc Resource) Create(name string, template string) (err error) {
 
 	initFile := path.Join(p, "PROJINIT")
 	if _, maybeNotExists := os.Stat(initFile); !os.IsNotExist(maybeNotExists) {
-		cmd := exec.Command(initFile)
+		// TODO: handle the bang instead
+		cmd := exec.Command("bash", initFile)
 		cmd.Dir = p
 		cmd.Env = append(cmd.Env, "PROJECT="+name, "TEMPLATE="+template)
 		cmd.Stdin = os.Stdin
@@ -184,6 +194,7 @@ func (rc Resource) Create(name string, template string) (err error) {
 	return
 }
 
+// Remove the resource instance
 func (rc Resource) Remove(name string) (err error) {
 	p, err := rc.Instance(name)
 	if err != nil {
@@ -198,6 +209,7 @@ func (rc Resource) Remove(name string) (err error) {
 	return
 }
 
+// List searchs through the resource instance(s) using a regex pattern
 func (rc Resource) List(pattern string) (err error) {
 	re, err := regexp.Compile(pattern)
 	if err != nil {
@@ -217,6 +229,7 @@ func (rc Resource) List(pattern string) (err error) {
 	return
 }
 
+// Backup a given resource using restic
 func (rc Resource) Backup(name string) (err error) {
 	repos := ResticRepos()
 	if len(repos) == 0 {
@@ -251,6 +264,7 @@ func (rc Resource) Backup(name string) (err error) {
 	return
 }
 
+// Restore restores a resource instance from the latest backup
 func (rc Resource) Restore(name string) (err error) {
 	repos := ResticRepos()
 	if len(repos) == 0 {
@@ -307,6 +321,7 @@ func (rc Resource) Restore(name string) (err error) {
 
 }
 
+// Visit a resource instance
 func (rc Resource) Visit(name string) (err error) {
 	shell := os.Getenv("SHELL")
 	invokedExe := shell
@@ -363,7 +378,6 @@ func (rc Resource) Visit(name string) (err error) {
 }
 
 func main() {
-
 	app := kingpin.New("proj", "A stupid simple project manager")
 	app.Version("0.1.0")
 	app.Author("Ian Shehadeh <IanShehadeh2020@gmail.com>")
@@ -372,7 +386,7 @@ func main() {
 	projectFlag := false
 	templateFlag := false
 
-	app.Arg("RESOURCE", "The resource which will be operated on").StringVar(&flags.RcName)
+	app.Arg("RESOURCE", "The resource which will be operated on").StringVar(&flags.ResourceName)
 	app.Arg("TEMPLATE", "When creating a project it will be based off of this template").StringVar(&flags.TemplateName)
 
 	app.Flag("create", "Create a new instance of a resource").Short('c').BoolVar(&flags.Create)
@@ -398,28 +412,28 @@ func main() {
 	}
 	var err error
 
-	if flags.Visit {
-		err = flags.Target.Visit(flags.RcName)
+	if flags.Remove {
+		err = flags.Target.Remove(flags.ResourceName)
 	}
 
 	if flags.Create {
-		err = flags.Target.Create(flags.RcName, flags.TemplateName)
-	}
-
-	if flags.Remove {
-		err = flags.Target.Remove(flags.RcName)
-	}
-
-	if flags.List {
-		err = flags.Target.List(flags.RcName)
+		err = flags.Target.Create(flags.ResourceName, flags.TemplateName)
 	}
 
 	if flags.Restore {
-		err = flags.Target.Restore(flags.RcName)
+		err = flags.Target.Restore(flags.ResourceName)
+	}
+
+	if flags.Visit {
+		err = flags.Target.Visit(flags.ResourceName)
 	}
 
 	if flags.Backup {
-		err = flags.Target.Backup(flags.RcName)
+		err = flags.Target.Backup(flags.ResourceName)
+	}
+
+	if flags.List {
+		err = flags.Target.List(flags.ResourceName)
 	}
 
 	if err != nil {
