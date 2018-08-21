@@ -31,9 +31,10 @@ const (
 )
 
 var (
-	ErrNoResticRepos    = errors.New("No restic repos found, please specify $PROJ_RESTIC_REPOS")
-	ErrResticNotFound   = errors.New("Could not find restic in $PATH")
-	ErrOptionOutOfRange = errors.New("Invalid response, please choose one of the provided options")
+	ErrNoResticRepos       = errors.New("No restic repos found, please specify $PROJ_RESTIC_REPOS")
+	ErrResticNotFound      = errors.New("Could not find restic in $PATH")
+	ErrOptionOutOfRange    = errors.New("Invalid response, please choose one of the provided options")
+	ErrMissingDropboxToken = errors.New("No dropbox token found, please set $PROJ_DROPBOX_TOKEN")
 )
 
 // Flags is a structure containing all the CLI flags and Args
@@ -49,6 +50,8 @@ type Flags struct {
 	Backup  bool
 	Restore bool
 	Visit   bool
+	Sync    bool
+	Pull    bool
 }
 
 // getenvOr gets an environment variable or returns a default value if the variable was not set
@@ -154,10 +157,30 @@ func (rc Resource) Directory() string {
 	return ""
 }
 
+func (rc Resource) Sync(name string) (err error) {
+	tok := os.Getenv("PROJ_DROPBOX_TOKEN")
+	if tok == "" {
+		return ErrMissingDropboxToken
+	}
+
+	db := NewDropboxClient(rc, name, tok)
+	return db.Sync()
+}
+
 func (rc Resource) Instance(name string) (p string, err error) {
 	p = path.Join(rc.Directory(), name)
 	_, err = os.Stat(p)
 	return
+}
+
+func (rc Resource) Pull(name string) (err error) {
+	tok := os.Getenv("PROJ_DROPBOX_TOKEN")
+	if tok == "" {
+		return ErrMissingDropboxToken
+	}
+
+	db := NewDropboxClient(rc, name, tok)
+	return db.Pull()
 }
 
 func (rc Resource) Create(name string, template string) (err error) {
@@ -194,7 +217,6 @@ func (rc Resource) Create(name string, template string) (err error) {
 		}
 
 		err = os.Remove(initFile)
-
 	}
 	return
 }
@@ -215,21 +237,45 @@ func (rc Resource) Remove(name string) (err error) {
 }
 
 // List searchs through the resource instance(s) using a regex pattern
-func (rc Resource) List(pattern string) (err error) {
-	re, err := regexp.Compile(pattern)
-	if err != nil {
-		return
+func (rc Resource) List(rules ...string) (err error) {
+	compiledRules := make([]*regexp.Regexp, 0, len(rules))
+	for _, rule := range rules {
+		compiled, err := regexp.Compile(rule)
+		if err != nil {
+			return err
+		}
+		compiledRules = append(compiledRules, compiled)
 	}
-
 	entries, err := ioutil.ReadDir(rc.Directory())
 	if err != nil {
 		return
 	}
 
 	for _, f := range entries {
-		if pattern == "" || re.MatchString(f.Name()) {
-			fmt.Printf("%s\n", f.Name())
+		canWrite := true
+		for _, r := range compiledRules {
+			if !r.MatchString(f.Name()) {
+				canWrite = false
+				break
+			}
 		}
+
+		if canWrite {
+			fmt.Println(f.Name())
+		}
+	}
+	return
+}
+
+func (rc Resource) GetInstances() (insts []string, err error) {
+	entries, err := ioutil.ReadDir(rc.Directory())
+	insts = make([]string, len(entries))
+	if err != nil {
+		return
+	}
+
+	for _, f := range entries {
+		insts = append(insts, f.Name())
 	}
 	return
 }
@@ -430,8 +476,15 @@ func main() {
 	projectFlag := false
 	templateFlag := false
 
-	app.Arg("RESOURCE", "The resource which will be operated on").StringVar(&flags.ResourceName)
-	app.Arg("TEMPLATE", "When creating a project it will be based off of this template").StringVar(&flags.TemplateName)
+	app.Arg("RESOURCE", "The resource which will be operated on").HintAction(func() []string {
+		options, _ := flags.Target.GetInstances()
+		return options
+	}).StringVar(&flags.ResourceName)
+
+	app.Arg("TEMPLATE", "When creating a project it will be based off of this template").HintAction(func() []string {
+		options, _ := Template.GetInstances()
+		return options
+	}).StringVar(&flags.TemplateName)
 
 	app.Flag("create", "Create a new instance of a resource").Short('c').BoolVar(&flags.Create)
 	app.Flag("list", "list all instances of a resource").Short('l').BoolVar(&flags.List)
@@ -439,6 +492,8 @@ func main() {
 	app.Flag("backup", "Backup a resource instance").Short('b').BoolVar(&flags.Backup)
 	app.Flag("restore", "Restore from a backup").Short('e').BoolVar(&flags.Restore)
 	app.Flag("visit", "Run a new instance of the current shell in this resource's directory").Short('v').BoolVar(&flags.Visit)
+	app.Flag("sync", "Sync the project with its origin").Short('s').BoolVar(&flags.Sync)
+	app.Flag("pull", "Pull the project from its origin").Short('p').BoolVar(&flags.Pull)
 
 	app.Flag("project", "Operate on a project").Short('P').BoolVar(&projectFlag)
 	app.Flag("template", "Operate on a template").Short('T').BoolVar(&templateFlag)
@@ -454,6 +509,7 @@ func main() {
 	} else {
 		app.Fatalf("Please specify either --project (-P) or --template (-T)")
 	}
+
 	var err error
 
 	if flags.Remove {
@@ -462,6 +518,10 @@ func main() {
 
 	if flags.Create {
 		err = flags.Target.Create(flags.ResourceName, flags.TemplateName)
+	}
+
+	if flags.Pull {
+		err = flags.Target.Pull(flags.ResourceName)
 	}
 
 	if flags.Restore {
@@ -477,7 +537,15 @@ func main() {
 	}
 
 	if flags.List {
-		err = flags.Target.List(flags.ResourceName)
+		if flags.ResourceName != "" {
+			err = flags.Target.List(flags.ResourceName)
+		} else {
+			err = flags.Target.List()
+		}
+	}
+
+	if flags.Sync {
+		err = flags.Target.Sync(flags.ResourceName)
 	}
 
 	if err != nil {
