@@ -1,0 +1,248 @@
+package repo
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"io/ioutil"
+	"os"
+	"os/exec"
+	"path"
+	"regexp"
+	"strings"
+	"syscall"
+
+	"github.com/IanS5/go-proj/cli"
+	"github.com/IanS5/go-proj/service"
+	log "github.com/sirupsen/logrus"
+)
+
+const projectFolderPerm = 0775
+
+var (
+	ErrNoSuchProject = errors.New("No such project")
+)
+
+type ProjectRepository struct {
+	baseFolder  string
+	interactive bool
+}
+
+func modEnviron(newVars map[string]string) []string {
+	env := os.Environ()
+	env2 := env
+	env = env[:0]
+
+	for _, v := range env2 {
+		for newVar, newVal := range newVars {
+			if len(newVar) < len(v) && strings.HasPrefix(newVar, v) && v[len(newVar)] == '=' {
+				env = append(env, newVar+"="+newVal)
+				delete(newVars, newVar)
+				break
+			}
+		}
+		env = append(env, v)
+	}
+
+	for newVar, newVal := range newVars {
+		env = append(env, newVar+"="+newVal)
+	}
+
+	return env
+}
+
+func NewLocal(base string) *ProjectRepository {
+	return &ProjectRepository{
+		baseFolder:  base,
+		interactive: false,
+	}
+}
+
+func NewInteractiveLocal(base string) *ProjectRepository {
+	return &ProjectRepository{
+		baseFolder:  base,
+		interactive: true,
+	}
+}
+
+func (fr *ProjectRepository) Path(name string) string {
+	return path.Join(fr.baseFolder, name)
+}
+
+func (fr *ProjectRepository) Id(name string) string {
+	// project Ids are created using the process
+	// "Project##{name-of-project}" -> Sha256 -> Hex
+
+	hashed := sha256.Sum256([]byte("Project##" + name))
+	return hex.EncodeToString(hashed[:])
+}
+
+func (fr *ProjectRepository) HistFile(name string) string {
+	return path.Join(os.Getenv("HOME"), ".proj", "hist", fr.Id(name))
+}
+
+func (fr *ProjectRepository) Create(name string) (err error) {
+	folder := fr.Path(name)
+	log.Debugf("Creating \"%s\" at %s", name, folder)
+
+	if _, err := os.Stat(folder); !os.IsNotExist(err) {
+		if fr.interactive && !cli.Confirm("%s already exists, overwrite it?", name) {
+			return nil
+		}
+
+		log.Debugf("Removing %s", folder)
+		os.RemoveAll(folder)
+	}
+
+	log.Debugf("Making directory %s", folder)
+	return os.MkdirAll(folder, projectFolderPerm)
+}
+
+func (fr *ProjectRepository) Delete(name string) (err error) {
+	folder := fr.Path(name)
+	log.Debugf("Removing \"%s\" at %s", name, folder)
+
+	if fr.interactive && !cli.Confirm("Are you sure you want to delete %s?", name) {
+		return nil
+	}
+	return os.RemoveAll(folder)
+}
+
+func (fr *ProjectRepository) Visit(name string) (err error) {
+	folder := fr.Path(name)
+	if _, err := os.Stat(folder); os.IsNotExist(err) {
+		return ErrNoSuchProject
+	} else if err != nil {
+		return err
+	}
+
+	shell := os.Getenv("SHELL")
+	invokedExe := shell
+
+	if shell == "" {
+		invokedExe = "sh"
+		shell, err = exec.LookPath("sh")
+	} else if !path.IsAbs(shell) {
+		shell, err = exec.LookPath(shell)
+	}
+	if err != nil {
+		return err
+	}
+
+	env := modEnviron(map[string]string{
+		"PROJ_CURRENT_PROJECT_BASE": folder,
+		"PROJ_CURRENT_PROJECT_NAME": name,
+		"HISTFILE":                  fr.HistFile(name),
+		"fish_history":              fr.Id(name),
+	})
+
+	err = os.Chdir(folder)
+	if err != nil {
+		return err
+	}
+
+	cli.ClearScreen()
+	return syscall.Exec(shell, []string{invokedExe}, env)
+}
+
+func (fr *ProjectRepository) List(filters ...string) (matches []string, err error) {
+	folder := fr.Path("")
+	finfo, err := ioutil.ReadDir(folder)
+	if err != nil {
+		return
+	}
+
+	compiledFilters := make([]*regexp.Regexp, 0, len(filters))
+	matches = make([]string, 0, len(finfo))
+
+	for _, filter := range filters {
+		re, err := regexp.Compile(filter)
+		if err != nil {
+			return nil, err
+		}
+		compiledFilters = append(compiledFilters, re)
+	}
+
+	for _, f := range finfo {
+		if !f.IsDir() {
+			continue
+		}
+
+		itemName := f.Name()
+		canWrite := true
+		for _, re := range compiledFilters {
+			if !re.MatchString(itemName) {
+				canWrite = true
+				break
+			}
+		}
+
+		if canWrite {
+			matches = append(matches, itemName)
+		}
+	}
+	return
+}
+
+func (fr *ProjectRepository) NonInteractive() *ProjectRepository {
+	return &ProjectRepository{
+		baseFolder:  fr.baseFolder,
+		interactive: false,
+	}
+}
+
+func (fr *ProjectRepository) Upload(name string, s service.StorageService) (err error) {
+	folder := fr.Path(name)
+	remoteFolder := "/" + fr.Id(name)
+	if _, err := os.Stat(folder); os.IsNotExist(err) {
+		return ErrNoSuchProject
+	} else if err != nil {
+		return err
+	}
+
+	return s.WalkDiffs(folder, remoteFolder,
+		func(file string, diff service.DiffResult) (err error) {
+			switch diff {
+			case service.DiffResultMatch:
+				// Do nothing
+			case service.DiffResultMismatch, service.DiffResultOnlyExistsLocal:
+				localFile := path.Join(folder, file)
+				remoteFile := path.Join(remoteFolder, file)
+				log.Debugf("(UPLOAD) %q -> %q", localFile, remoteFile)
+				err = s.Upload(localFile, remoteFile)
+			case service.DiffResultOnlyExistsRemote:
+				remoteFile := path.Join(remoteFolder, file)
+				log.Debugf("(REMOVE) %q", remoteFile)
+				err = s.Delete(path.Join(remoteFolder, file))
+			}
+
+			return
+		})
+}
+
+func (fr *ProjectRepository) Pull(name string, s service.StorageService) (err error) {
+
+	folder := fr.Path(name)
+	remoteFolder := "/" + fr.Id(name)
+
+	os.MkdirAll(folder, projectFolderPerm)
+
+	return s.WalkDiffs(folder, remoteFolder,
+		func(file string, diff service.DiffResult) (err error) {
+			switch diff {
+			case service.DiffResultMatch:
+				// Do nothing
+			case service.DiffResultMismatch, service.DiffResultOnlyExistsRemote:
+				localFile := path.Join(folder, file)
+				remoteFile := path.Join(remoteFolder, file)
+				log.Debugf("(DOWNLOAD) %q -> %q", remoteFile, localFile)
+				err = s.Download(localFile, remoteFile)
+			case service.DiffResultOnlyExistsLocal:
+				localFile := path.Join(folder, file)
+				log.Debugf("(REMOVE) %q", localFile)
+				err = os.RemoveAll(localFile)
+			}
+
+			return
+		})
+}

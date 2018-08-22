@@ -1,34 +1,22 @@
 package main
 
 import (
-	"encoding/base64"
+	"encoding/json"
 	"errors"
-	"fmt"
 	"io/ioutil"
-	"log"
 	"os"
-	"os/exec"
 	"path"
 	"regexp"
-	"strconv"
 	"strings"
-	"syscall"
 
-	"github.com/otiai10/copy"
+	"github.com/IanS5/go-proj/repo"
+	"github.com/IanS5/go-proj/service"
+
+	log "github.com/sirupsen/logrus"
 	kingpin "gopkg.in/alecthomas/kingpin.v2"
 )
 
-// A Resource is a type of folder that can have an [Operation] applied to it
-// Every resource gets its own directory.
-type Resource uint8
-
-const (
-	// Template is a folder that will be copied into another location to create a project
-	Template = Resource(iota)
-
-	// Project is a single working directory for the user
-	Project
-)
+var cacheFilePath = path.Join(os.Getenv("HOME"), ".proj-cache")
 
 var (
 	ErrNoResticRepos       = errors.New("No restic repos found, please specify $PROJ_RESTIC_REPOS")
@@ -37,515 +25,242 @@ var (
 	ErrMissingDropboxToken = errors.New("No dropbox token found, please set $PROJ_DROPBOX_TOKEN")
 )
 
-// Flags is a structure containing all the CLI flags and Args
-type Flags struct {
-	Target Resource
-
-	ResourceName string
-	TemplateName string
-
-	Create  bool
-	List    bool
-	Remove  bool
-	Backup  bool
-	Restore bool
-	Visit   bool
-	Sync    bool
-	Pull    bool
+type CachedRepo struct {
+	Name string `json:"name"`
+	Path string `json:"path"`
 }
 
-// getenvOr gets an environment variable or returns a default value if the variable was not set
-func getenvOr(env string, dflt string) string {
-	v := os.Getenv(env)
-	if v == "" {
-		return dflt
-	}
-	return v
-
+type Cache struct {
+	Repos       []CachedRepo `json:"repos"`
+	PrimaryRepo string       `json:"primary-repo"`
+	DropboxKey  string       `json:"dropbox-key"`
 }
 
-// clearScreen clears the screen
-func clearScreen() {
-	// TODO: support windows CMD.EXE
-	print("\033[2J\033[H")
-}
-
-// imax is an integer max function
-func imax(x, y int) int {
-	if x > y {
-		return x
-	}
-
-	return y
-}
-
-// confirm some action, ask the user to input y/n.
-func confirm(question string, args ...interface{}) bool {
-	fmt.Printf("%s [Y/n] ", fmt.Sprintf(question, args...))
-	response := ""
-	fmt.Scanln(&response)
-	switch strings.Trim(strings.ToLower(response), "\t\r\n\v ") {
-	case "y", "ye", "yes":
-		return true
-	default:
-		return false
-	}
-}
-
-// Ask the user to pick one of several options, return the one they picked
-func choose(question string, options []string, args ...interface{}) (choice string, err error) {
-	optionStr := strings.Builder{}
-	optionStr.Grow(12)
-
-	for i, s := range options {
-		fmt.Printf(" %d) %s\n", i+1, s)
-		if i < 3 {
-			if i != 0 {
-				optionStr.WriteString("/")
-			}
-			optionStr.WriteString(strconv.Itoa(i + 1))
+func getCache() *Cache {
+	if data, err := ioutil.ReadFile(cacheFilePath); err != nil {
+		cache := &Cache{
+			Repos: make([]CachedRepo, 0),
 		}
-	}
-	if len(options) > 3 {
-		optionStr.WriteString("...")
-	}
 
-	fmt.Printf("%s [%s] ", fmt.Sprintf(question, args...), optionStr.String())
-	response := ""
-	fmt.Scanln(&response)
-	option, err := strconv.Atoi(strings.Trim(response, "\t\r\n\v "))
-	if err != nil {
-		return
-	}
-
-	if option > len(options) || option < 1 {
-		return "", ErrOptionOutOfRange
-	}
-
-	return options[option-1], err
-}
-
-// ResticRepos lissts the user's restic repositories
-func ResticRepos() []string {
-	r := os.Getenv("PROJ_RESTIC_REPOS")
-	if r != "" {
-		return strings.Split(os.Getenv("PROJ_RESTIC_REPOS"), string(os.PathListSeparator))
+		writeCache(cache)
+		return cache
 	} else {
-		return []string{}
-	}
-}
-
-// Root gets proj's root directory
-func Root() string {
-	return getenvOr("PROJ_ROOT_DIR", path.Join(os.Getenv("HOME"), ".proj"))
-}
-
-func HistDir() string {
-	return getenvOr("PROJ_HIST_DIR", path.Join(Root(), ".hist"))
-}
-
-// Directory gets the resource's root directory
-func (rc Resource) Directory() string {
-	switch rc {
-	case Project:
-		return getenvOr("PROJ_PROJECT_DIR", path.Join(Root(), "projects"))
-	case Template:
-		return getenvOr("PROJ_TEMPLATE_DIR", path.Join(Root(), "templates"))
-	}
-
-	log.Fatal("Invalid resource")
-	return ""
-}
-
-func (rc Resource) Sync(name string) (err error) {
-	tok := os.Getenv("PROJ_DROPBOX_TOKEN")
-	if tok == "" {
-		return ErrMissingDropboxToken
-	}
-
-	db := NewDropboxClient(rc, name, tok)
-	return db.Sync()
-}
-
-func (rc Resource) Instance(name string) (p string, err error) {
-	p = path.Join(rc.Directory(), name)
-	_, err = os.Stat(p)
-	return
-}
-
-func (rc Resource) Pull(name string) (err error) {
-	tok := os.Getenv("PROJ_DROPBOX_TOKEN")
-	if tok == "" {
-		return ErrMissingDropboxToken
-	}
-
-	db := NewDropboxClient(rc, name, tok)
-	return db.Pull()
-}
-
-func (rc Resource) Create(name string, template string) (err error) {
-	p := path.Join(rc.Directory(), name)
-
-	if template != "" {
-		templates := Template
-		tmpl, err := templates.Instance(template)
+		cache := &Cache{}
+		err = json.Unmarshal(data, cache)
 		if err != nil {
-			return err
+			log.Fatal(err)
+		}
+		return cache
+	}
+}
+
+func writeCache(c *Cache) {
+	log.WithField("Cache", c).Debug("Writing cache")
+
+	f, err := os.Create(cacheFilePath)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer f.Close()
+
+	data, err := json.Marshal(c)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	f.Write(data)
+	f.Sync()
+}
+
+func validateName(p string) {
+	if !regexp.MustCompile("[a-zA-Z0-9+_\\-!]*").MatchString(p) {
+		log.WithField("Name", p).Fatal("Repo names may only contain letters, numbers, _, - and !")
+	}
+}
+
+func (cache *Cache) parseStorageService(p string) service.StorageService {
+	switch strings.Trim(strings.ToLower(p), "\n\r\t\v ") {
+	case "dropbox":
+		if cache.DropboxKey == "" {
+			log.Fatal("You have not logged into dropbox")
+		}
+		return service.NewDropbox(cache.DropboxKey)
+	}
+	return nil
+}
+
+func (cache *Cache) parseProject(p string) (project string, repository *repo.ProjectRepository) {
+	parts := strings.Split(p, "/")
+	if len(parts) > 2 {
+		log.Fatal("Projects should be identifier with either [repo]/[project] or simply [project]")
+	}
+
+	var repoName string
+	if len(parts) == 1 {
+		if cache.PrimaryRepo == "" {
+			log.Fatal("No primary repo set!")
 		}
 
-		err = copy.Copy(tmpl, p)
+		repoName = cache.PrimaryRepo
+		project = parts[0]
 	} else {
-		err = os.Mkdir(p, 0755)
+		repoName = parts[0]
+		project = parts[1]
 	}
 
-	if err != nil {
-		return err
-	}
+	validateName(repoName)
+	validateName(project)
 
-	initFile := path.Join(p, "PROJINIT")
-	if _, maybeNotExists := os.Stat(initFile); !os.IsNotExist(maybeNotExists) {
-		// TODO: handle the bang instead
-		cmd := exec.Command("bash", initFile)
-		cmd.Dir = p
-		cmd.Env = append(cmd.Env, "PROJECT="+name, "TEMPLATE="+template)
-		cmd.Stdin = os.Stdin
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		err = cmd.Run()
-		if err != nil {
-			return
-		}
-
-		err = os.Remove(initFile)
-	}
-	return
-}
-
-// Remove the resource instance
-func (rc Resource) Remove(name string) (err error) {
-	p, err := rc.Instance(name)
-	if err != nil {
-		return
-	}
-
-	if !confirm("Are you sure you want to remove %s?", name) {
-		return
-	}
-
-	err = os.RemoveAll(p)
-	return
-}
-
-// List searchs through the resource instance(s) using a regex pattern
-func (rc Resource) List(rules ...string) (err error) {
-	compiledRules := make([]*regexp.Regexp, 0, len(rules))
-	for _, rule := range rules {
-		compiled, err := regexp.Compile(rule)
-		if err != nil {
-			return err
-		}
-		compiledRules = append(compiledRules, compiled)
-	}
-	entries, err := ioutil.ReadDir(rc.Directory())
-	if err != nil {
-		return
-	}
-
-	for _, f := range entries {
-		canWrite := true
-		for _, r := range compiledRules {
-			if !r.MatchString(f.Name()) {
-				canWrite = false
-				break
-			}
-		}
-
-		if canWrite {
-			fmt.Println(f.Name())
+	var folder string
+	for _, r := range cache.Repos {
+		if r.Name == repoName {
+			folder = r.Path
+			break
 		}
 	}
-	return
+
+	if folder == "" {
+		log.Fatalf("No such repo \"%s\"", repoName)
+	}
+
+	return project, repo.NewInteractiveLocal(folder)
 }
 
-func (rc Resource) GetInstances() (insts []string, err error) {
-	entries, err := ioutil.ReadDir(rc.Directory())
-	insts = make([]string, len(entries))
-	if err != nil {
-		return
-	}
-
-	for _, f := range entries {
-		insts = append(insts, f.Name())
-	}
-	return
-}
-
-// Backup a given resource using restic
-func (rc Resource) Backup(name string) (err error) {
-	repos := ResticRepos()
-	if len(repos) == 0 {
-		return ErrNoResticRepos
-	}
-
-	restic, err := exec.LookPath("restic")
-	if err != nil {
-		if os.IsNotExist(err) {
-			return ErrResticNotFound
-		}
-		return err
-	}
-
-	dir, err := rc.Instance(name)
-	if err != nil {
-		return err
-	}
-
-	for _, r := range repos {
-		cmd := exec.Command(restic, "--repo", r, "backup", dir)
-		cmd.Stderr = os.Stderr
-		cmd.Stdout = os.Stdout
-		cmd.Stdin = os.Stdin
-
-		err = cmd.Run()
-		if err != nil {
-			return err
-		}
-
-	}
-	return
-}
-
-// Restore restores a resource instance from the latest backup
-func (rc Resource) Restore(name string) (err error) {
-	repos := ResticRepos()
-	if len(repos) == 0 {
-		return ErrNoResticRepos
-	}
-
-	restic, err := exec.LookPath("restic")
-	if err != nil {
-		if os.IsNotExist(err) {
-			return ErrResticNotFound
-		}
-		return err
-	}
-
-	dir, err := rc.Instance(name)
-	if !os.IsNotExist(err) {
-		if !confirm("%s already exists, are you sure you want to restore from a backup?", name) {
-			return nil
-		}
-		err = os.RemoveAll(dir)
-		if err != nil {
-			return err
-		}
-
-	}
-
-	repo, err := choose("Please select a rustic repository", repos)
-	if err != nil {
-		return err
-	}
-	tmpdir := path.Join(os.TempDir(), "proj-restic-mount_"+name)
-	os.RemoveAll(tmpdir)
-
-	cmd := exec.Command(restic,
-		"--repo", repo,
-		"restore", "latest",
-		"--target", tmpdir,
-		"--path", dir)
-	cmd.Stderr = os.Stderr
-	cmd.Stdout = os.Stdout
-	cmd.Stdin = os.Stdin
-	err = cmd.Run()
-	if err != nil {
-		return err
-	}
-
-	err = os.Rename(path.Join(tmpdir, dir), dir)
-	if err != nil {
-		err = copy.Copy(path.Join(tmpdir, dir), dir)
-	}
-	os.RemoveAll(tmpdir)
-
-	return
-
-}
-
-func (rc Resource) String() string {
-	switch rc {
-	case Template:
-		return "Template"
-	case Project:
-		return "Project"
-	default:
-		return "?"
-	}
-}
-
-func (rc Resource) Id(name string) string {
-	out := strings.Builder{}
-	encoder := base64.NewEncoder(base64.StdEncoding, &out)
-	encoder.Write([]byte(rc.String()))
-	encoder.Write([]byte("##"))
-	encoder.Write([]byte(name))
-	return out.String()
-}
-
-func (rc Resource) HistFile(name string) string {
-	return path.Join(HistDir(), rc.Id(name))
-}
-
-func modEnviron(newVars map[string]string) []string {
-	env := os.Environ()
-	env2 := env
-	env = env[:0]
-
-	for _, v := range env2 {
-		for newVar, newVal := range newVars {
-			if len(newVar) < len(v) && strings.HasPrefix(newVar, v) && v[len(newVar)] == '=' {
-				env = append(env, newVar+"="+newVal)
-				delete(newVars, newVar)
-				break
-			}
-		}
-		env = append(env, v)
-	}
-
-	for newVar, newVal := range newVars {
-		env = append(env, newVar+"="+newVal)
-	}
-
-	return env
-}
-
-// Visit a resource instance
-func (rc Resource) Visit(name string) (err error) {
-	shell := os.Getenv("SHELL")
-	invokedExe := shell
-
-	if shell == "" {
-		invokedExe = "sh"
-		shell, err = exec.LookPath("sh")
-	} else if !path.IsAbs(shell) {
-		shell, err = exec.LookPath(shell)
-	}
-	if err != nil {
-		return err
-	}
-
-	instancePath, err := rc.Instance(name)
-	if err != nil {
-		return err
-	}
-
-	baseEnvVar := ""
-	nameEnvVar := ""
-
-	switch rc {
-	case Project:
-		baseEnvVar = "PROJ_CURRENT_PROJECT_BASE"
-		nameEnvVar = "PROJ_CURRENT_PROJECT_NAME"
-	case Template:
-		baseEnvVar = "PROJ_CURRENT_TEMPLATE_BASE"
-		nameEnvVar = "PROJ_CURRENT_TEMPLATE_NAME"
-	}
-
-	env := modEnviron(map[string]string{
-		baseEnvVar:     instancePath,
-		nameEnvVar:     name,
-		"HISTFILE":     rc.HistFile(name),
-		"fish_history": rc.Id(name),
-	})
-
-	err = os.Chdir(instancePath)
-	if err != nil {
-		return err
-	}
-
-	clearScreen()
-	return syscall.Exec(shell, []string{invokedExe}, env)
+func addProjectOp(app *kingpin.Application, project *string, long, short, help string) {
+	app.Command(long, help).
+		Alias(short).
+		Arg("PROJECT", "Project to operate on, in the form of [repo]/[project]").
+		Required().
+		NoEnvar().
+		StringVar(project)
 }
 
 func main() {
-	app := kingpin.New("proj", "A stupid simple project manager")
-	app.Version("0.1.0")
-	app.Author("Ian Shehadeh <IanShehadeh2020@gmail.com>")
+	log.SetFormatter(&log.TextFormatter{
+		DisableTimestamp:       true,
+		DisableLevelTruncation: true,
+		DisableSorting:         true,
+		QuoteEmptyFields:       true,
+	})
+	log.SetOutput(os.Stdout)
+	log.SetLevel(log.DebugLevel)
 
-	flags := Flags{}
-	projectFlag := false
-	templateFlag := false
+	app := kingpin.
+		New("proj", "A stupid simple project management CLI").
+		Author("Ian Shehadeh <IanShehadeh2020@gmail.com>").
+		Version("0.1.1")
 
-	app.Arg("RESOURCE", "The resource which will be operated on").HintAction(func() []string {
-		options, _ := flags.Target.GetInstances()
-		return options
-	}).StringVar(&flags.ResourceName)
+	newRepo := app.Command("init", "initialize a new repository")
+	newRepoName := newRepo.Arg("NAME", "New repository name").Required().NoEnvar().String()
+	newRepoDir := newRepo.Arg("DIR", "New repository location").Required().NoEnvar().ExistingDir()
 
-	app.Arg("TEMPLATE", "When creating a project it will be based off of this template").HintAction(func() []string {
-		options, _ := Template.GetInstances()
-		return options
-	}).StringVar(&flags.TemplateName)
+	setPrimary := app.Command("primary", "set a new repo as the primary one")
+	setPrimaryName := setPrimary.Arg("NAME", "The primary repository's name").Required().NoEnvar().String()
 
-	app.Flag("create", "Create a new instance of a resource").Short('c').BoolVar(&flags.Create)
-	app.Flag("list", "list all instances of a resource").Short('l').BoolVar(&flags.List)
-	app.Flag("remove", "Remove an instance of a resource").Short('r').BoolVar(&flags.Remove)
-	app.Flag("backup", "Backup a resource instance").Short('b').BoolVar(&flags.Backup)
-	app.Flag("restore", "Restore from a backup").Short('e').BoolVar(&flags.Restore)
-	app.Flag("visit", "Run a new instance of the current shell in this resource's directory").Short('v').BoolVar(&flags.Visit)
-	app.Flag("sync", "Sync the project with its origin").Short('s').BoolVar(&flags.Sync)
-	app.Flag("pull", "Pull the project from its origin").Short('p').BoolVar(&flags.Pull)
+	db := app.Command("dropbox", "login/logoff from dropbox")
+	db.Command("login", "Login to dropbox")
+	db.Command("logout", "Logout of dropbox")
 
-	app.Flag("project", "Operate on a project").Short('P').BoolVar(&projectFlag)
-	app.Flag("template", "Operate on a template").Short('T').BoolVar(&templateFlag)
+	var project string
+	var serviceName string
 
-	app.Parse(os.Args[1:])
+	addProjectOp(app, &project, "visit", "v", "Visit a project")
+	addProjectOp(app, &project, "create", "c", "Create a new project")
+	addProjectOp(app, &project, "remove", "r", "Remove a project")
 
-	if projectFlag && templateFlag {
-		app.Fatalf("--project (-P) and --template (-T) are exclusive")
-	} else if projectFlag {
-		flags.Target = Project
-	} else if templateFlag {
-		flags.Target = Template
-	} else {
-		app.Fatalf("Please specify either --project (-P) or --template (-T)")
+	upload := app.Command("upload", "Upload a local project to a remote storage service").Alias("u")
+	upload.Arg("PROJECT", "Project to operate on, in the form of [repo]/[project]").
+		Required().
+		NoEnvar().
+		StringVar(&project)
+	upload.Arg("SERVICE", "The service where the project should be uploaded").
+		Default("dropbox").
+		NoEnvar().
+		EnumVar(&serviceName, "dropbox")
+
+	download := app.Command("download", "Download a remote packcage").Alias("d")
+	download.Arg("PROJECT", "Project to operate on, in the form of [repo]/[project]").
+		Required().
+		NoEnvar().
+		StringVar(&project)
+	download.Arg("SERVICE", "The service where the project should be uploaded").
+		Default("dropbox").
+		NoEnvar().
+		EnumVar(&serviceName, "dropbox")
+
+	cmd, err := app.Parse(os.Args[1:])
+	log.Debug("Command ", cmd)
+	if err != nil {
+		log.Fatal(err)
 	}
 
-	var err error
+	cache := getCache()
+	if cmd == "init" {
+		log.Infof("Adding repo %s", *newRepoName)
+		validateName(*newRepoName)
 
-	if flags.Remove {
-		err = flags.Target.Remove(flags.ResourceName)
+		cache.Repos = append(cache.Repos, CachedRepo{
+			Name: *newRepoName,
+			Path: *newRepoDir,
+		})
+
+		writeCache(cache)
+		return
 	}
 
-	if flags.Create {
-		err = flags.Target.Create(flags.ResourceName, flags.TemplateName)
+	if cmd == "dropbox login" {
+		cache.DropboxKey, err = service.InteractiveDropboxLogin()
+		if err != nil {
+			log.Fatal(err)
+		}
+		writeCache(cache)
 	}
 
-	if flags.Pull {
-		err = flags.Target.Pull(flags.ResourceName)
+	if cmd == "dropbox logout" {
+		err = service.DropboxInvalidateToken(cache.DropboxKey)
+		if err != nil {
+			log.Fatal(err)
+		}
+		cache.DropboxKey = ""
+		writeCache(cache)
 	}
 
-	if flags.Restore {
-		err = flags.Target.Restore(flags.ResourceName)
-	}
+	proj, repo := cache.parseProject(project)
 
-	if flags.Visit {
-		err = flags.Target.Visit(flags.ResourceName)
-	}
+	if cmd == "primary" {
+		log.Infof("Setting repo \"%s\" as the primary repository", *setPrimaryName)
 
-	if flags.Backup {
-		err = flags.Target.Backup(flags.ResourceName)
-	}
+		validateName(*setPrimaryName)
+		exists := false
+		for _, r := range cache.Repos {
+			if r.Name == *setPrimaryName {
+				exists = true
+			}
+		}
+		if !exists {
+			log.Fatalf("repo \"%s\" does not exist", *setPrimaryName)
 
-	if flags.List {
-		if flags.ResourceName != "" {
-			err = flags.Target.List(flags.ResourceName)
-		} else {
-			err = flags.Target.List()
+			cache.PrimaryRepo = *setPrimaryName
+			writeCache(cache)
+			return
 		}
 	}
 
-	if flags.Sync {
-		err = flags.Target.Sync(flags.ResourceName)
+	switch cmd {
+	case "visit":
+		err = repo.Visit(proj)
+
+	case "create":
+		err = repo.Create(proj)
+
+	case "remove":
+		err = repo.Delete(proj)
+
+	case "upload":
+		err = repo.Upload(proj, cache.parseStorageService(serviceName))
+
+	case "download":
+		err = repo.Pull(proj, cache.parseStorageService(serviceName))
 	}
 
 	if err != nil {

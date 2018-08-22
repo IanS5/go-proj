@@ -23,6 +23,12 @@
   revision = "7e9a647135a142c2669943d4a4d29be015ce9392"
 
 [[projects]]
+  name = "github.com/sirupsen/logrus"
+  packages = ["."]
+  revision = "3e01752db0189b9157070a0e1668a620f9a85da2"
+  version = "v1.0.6"
+
+[[projects]]
   branch = "master"
   name = "github.com/tj/go-dropbox"
   packages = ["."]
@@ -30,9 +36,18 @@
 
 [[projects]]
   branch = "master"
-  name = "github.com/tj/go-dropy"
-  packages = ["."]
-  revision = "225699a121562d2a1112529722a2368816df355f"
+  name = "golang.org/x/crypto"
+  packages = ["ssh/terminal"]
+  revision = "614d502a4dac94afa3a6ce146bd1736da82514c6"
+
+[[projects]]
+  branch = "master"
+  name = "golang.org/x/sys"
+  packages = [
+    "unix",
+    "windows"
+  ]
+  revision = "4ea2f632f6e912459fe60b26b1749377f0d889d5"
 
 [[projects]]
   name = "gopkg.in/alecthomas/kingpin.v2"
@@ -43,6 +58,6 @@
 [solve-meta]
   analyzer-name = "dep"
   analyzer-version = 1
-  inputs-digest = "dcfaa13722b0fefd7aab8c68ed68fbb13991b7aa0bbdc4f8051ef37552805b50"
+  inputs-digest = "41cee1598cdc9e118300e9086eba0825f92725d74cb04fb289ff8a040e6cb660"
   solver-name = "gps-cdcl"
   solver-version = 1
