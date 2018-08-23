@@ -137,7 +137,16 @@ func init() {
 	cmdDownload.PersistentFlags().StringVarP(&storageServiceName, "service", "s", "", "The service where the project can be downloaded")
 
 	cmdRoot.PersistentFlags().BoolVarP(&debug, "debug", "d", false, "Show debugging information")
-	cmdRoot.AddCommand(cmdDropbox, cmdRestic, cmdUpload, cmdList, cmdDownload, cmdVisit, cmdRepo, cmdRemove, cmdCreate, cmdRemove)
+	cmdRoot.AddCommand(
+		cmdDropbox,
+		cmdRestic,
+		cmdUpload,
+		cmdList,
+		cmdDownload,
+		cmdVisit,
+		cmdRepo,
+		cmdCreate,
+		cmdRemove)
 }
 
 func Execute() {
