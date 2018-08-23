@@ -191,7 +191,7 @@ func (fr *ProjectRepository) NonInteractive() *ProjectRepository {
 
 func (fr *ProjectRepository) Upload(name string, s StorageService) (err error) {
 	folder := fr.Path(name)
-	remoteFolder := "/" + fr.Id(name)
+	remoteFolder := "/" + name
 	if _, err := os.Stat(folder); os.IsNotExist(err) {
 		return ErrNoSuchProject
 	} else if err != nil {
@@ -219,9 +219,8 @@ func (fr *ProjectRepository) Upload(name string, s StorageService) (err error) {
 }
 
 func (fr *ProjectRepository) Pull(name string, s StorageService) (err error) {
-
 	folder := fr.Path(name)
-	remoteFolder := "/" + fr.Id(name)
+	remoteFolder := "/" + name
 
 	os.MkdirAll(folder, projectFolderPerm)
 
