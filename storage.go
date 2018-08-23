@@ -1,4 +1,4 @@
-package service
+package proj
 
 // DiffResult explains broadly explains the difference between the remote and local versions of a file
 type DiffResult uint8

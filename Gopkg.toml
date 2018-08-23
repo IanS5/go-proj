@@ -7,9 +7,9 @@
   name = "github.com/otiai10/copy"
 
 [[constraint]]
-  name = "gopkg.in/alecthomas/kingpin.v2"
-  version = "2.2.6"
-  
-[[constraint]]
   branch = "master"
   name = "github.com/tj/go-dropbox"
+
+[[constraint]]
+  name = "github.com/spf13/cobra"
+  version = "0.0.3"

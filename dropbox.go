@@ -1,14 +1,7 @@
-package service
+package proj
 
 import (
-	"context"
-	"encoding/json"
-	"errors"
-	"fmt"
 	"io"
-	"io/ioutil"
-	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -180,109 +173,4 @@ func NewDropbox(token string) *Dropbox {
 	return &Dropbox{
 		client: dropbox.New(dropbox.NewConfig(token)),
 	}
-}
-
-func DropboxInvalidateToken(token string) (err error) {
-	req, err := http.NewRequest("POST", "https://api.dropboxapi.com/2/auth/token/revoke", nil)
-	if err != nil {
-		return
-	}
-	req.Header.Add("Authorization", "Bearer "+token)
-	_, err = http.DefaultClient.Do(req)
-	return
-}
-
-func InteractiveDropboxLogin() (token string, err error) {
-	callbackURL := "localhost:8314"
-	authURL :=
-		fmt.Sprintf(
-			"https://www.dropbox.com/oauth2/authorize/?response_type=%s&client_id=%s&redirect_uri=%s",
-			"code",
-			"av3dt43wyk1hhz7",
-			url.QueryEscape("http://"+callbackURL),
-		)
-
-	fmt.Printf("Please navigate to \"%s\" in your browser\n", authURL)
-	server := &http.Server{Addr: callbackURL}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	code := ""
-	var handlerErr error
-	server.Handler = http.HandlerFunc(
-		func(w http.ResponseWriter, r *http.Request) {
-			handlerErr = r.ParseForm()
-			if handlerErr != nil {
-				fmt.Fprint(w, "Bad URL")
-				cancel()
-				return
-			}
-
-			code = r.FormValue("code")
-			if code != "" {
-				fmt.Fprint(w, "Yay! Everything's all good. You can close this tab and navigate back to your terminal.")
-			} else {
-				fmt.Fprint(w, "Missing token")
-			}
-			cancel()
-		},
-	)
-
-	go func() {
-		err = server.ListenAndServe()
-		if handlerErr != nil {
-			err = handlerErr
-		}
-	}()
-
-	select {
-	case <-ctx.Done():
-		server.Shutdown(ctx)
-		if err != nil {
-			return
-		}
-	}
-
-	if code == "" {
-		return "", errors.New("Request was missing code URL parameter")
-	}
-
-	var response struct {
-		Token     string `json:"access_token"`
-		TokenType string `json:"token_type"`
-		AccountID string `json:"account_id"`
-		UserID    string `json:"uid"`
-	}
-
-	log.Info("Fetching account token...")
-
-	resp, err := http.PostForm("https://api.dropboxapi.com/oauth2/token", url.Values{
-		"code":          []string{code},
-		"grant_type":    []string{"authorization_code"},
-		"client_id":     []string{"av3dt43wyk1hhz7"},
-		"client_secret": []string{"***REMOVED***"},
-		"redirect_uri":  []string{"http://" + callbackURL},
-	})
-
-	if err != nil {
-		return
-	}
-
-	if resp.StatusCode != 200 {
-		body, _ := ioutil.ReadAll(resp.Body)
-
-		log.
-			WithField("Status", resp.StatusCode).
-			WithField("Body", string(body)).
-			Fatal("Bad Status")
-	}
-	log.Info("Done!")
-
-	err = json.NewDecoder(resp.Body).Decode(&response)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	return response.Token, err
 }

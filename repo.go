@@ -1,4 +1,4 @@
-package repo
+package proj
 
 import (
 	"crypto/sha256"
@@ -12,8 +12,6 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/IanS5/go-proj/cli"
-	"github.com/IanS5/go-proj/service"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -86,7 +84,7 @@ func (fr *ProjectRepository) Create(name string) (err error) {
 	log.Debugf("Creating \"%s\" at %s", name, folder)
 
 	if _, err := os.Stat(folder); !os.IsNotExist(err) {
-		if fr.interactive && !cli.Confirm("%s already exists, overwrite it?", name) {
+		if fr.interactive && !Confirm("%s already exists, overwrite it?", name) {
 			return nil
 		}
 
@@ -102,7 +100,7 @@ func (fr *ProjectRepository) Delete(name string) (err error) {
 	folder := fr.Path(name)
 	log.Debugf("Removing \"%s\" at %s", name, folder)
 
-	if fr.interactive && !cli.Confirm("Are you sure you want to delete %s?", name) {
+	if fr.interactive && !Confirm("Are you sure you want to delete %s?", name) {
 		return nil
 	}
 	return os.RemoveAll(folder)
@@ -141,7 +139,7 @@ func (fr *ProjectRepository) Visit(name string) (err error) {
 		return err
 	}
 
-	cli.ClearScreen()
+	ClearScreen()
 	return syscall.Exec(shell, []string{invokedExe}, env)
 }
 
@@ -191,7 +189,7 @@ func (fr *ProjectRepository) NonInteractive() *ProjectRepository {
 	}
 }
 
-func (fr *ProjectRepository) Upload(name string, s service.StorageService) (err error) {
+func (fr *ProjectRepository) Upload(name string, s StorageService) (err error) {
 	folder := fr.Path(name)
 	remoteFolder := "/" + fr.Id(name)
 	if _, err := os.Stat(folder); os.IsNotExist(err) {
@@ -201,16 +199,16 @@ func (fr *ProjectRepository) Upload(name string, s service.StorageService) (err 
 	}
 
 	return s.WalkDiffs(folder, remoteFolder,
-		func(file string, diff service.DiffResult) (err error) {
+		func(file string, diff DiffResult) (err error) {
 			switch diff {
-			case service.DiffResultMatch:
+			case DiffResultMatch:
 				// Do nothing
-			case service.DiffResultMismatch, service.DiffResultOnlyExistsLocal:
+			case DiffResultMismatch, DiffResultOnlyExistsLocal:
 				localFile := path.Join(folder, file)
 				remoteFile := path.Join(remoteFolder, file)
 				log.Debugf("(UPLOAD) %q -> %q", localFile, remoteFile)
 				err = s.Upload(localFile, remoteFile)
-			case service.DiffResultOnlyExistsRemote:
+			case DiffResultOnlyExistsRemote:
 				remoteFile := path.Join(remoteFolder, file)
 				log.Debugf("(REMOVE) %q", remoteFile)
 				err = s.Delete(path.Join(remoteFolder, file))
@@ -220,7 +218,7 @@ func (fr *ProjectRepository) Upload(name string, s service.StorageService) (err 
 		})
 }
 
-func (fr *ProjectRepository) Pull(name string, s service.StorageService) (err error) {
+func (fr *ProjectRepository) Pull(name string, s StorageService) (err error) {
 
 	folder := fr.Path(name)
 	remoteFolder := "/" + fr.Id(name)
@@ -228,16 +226,16 @@ func (fr *ProjectRepository) Pull(name string, s service.StorageService) (err er
 	os.MkdirAll(folder, projectFolderPerm)
 
 	return s.WalkDiffs(folder, remoteFolder,
-		func(file string, diff service.DiffResult) (err error) {
+		func(file string, diff DiffResult) (err error) {
 			switch diff {
-			case service.DiffResultMatch:
+			case DiffResultMatch:
 				// Do nothing
-			case service.DiffResultMismatch, service.DiffResultOnlyExistsRemote:
+			case DiffResultMismatch, DiffResultOnlyExistsRemote:
 				localFile := path.Join(folder, file)
 				remoteFile := path.Join(remoteFolder, file)
 				log.Debugf("(DOWNLOAD) %q -> %q", remoteFile, localFile)
 				err = s.Download(localFile, remoteFile)
-			case service.DiffResultOnlyExistsLocal:
+			case DiffResultOnlyExistsLocal:
 				localFile := path.Join(folder, file)
 				log.Debugf("(REMOVE) %q", localFile)
 				err = os.RemoveAll(localFile)
@@ -245,4 +243,18 @@ func (fr *ProjectRepository) Pull(name string, s service.StorageService) (err er
 
 			return
 		})
+}
+
+func (fr *ProjectRepository) Backup(bs BackupService, name string, repos ...string) (err error) {
+	return bs.Backup(fr.Path(name), repos...)
+}
+
+func (fr *ProjectRepository) Restore(bs BackupService, name string, repo string) (err error) {
+	folder := fr.Path(name)
+	if _, err = os.Stat(folder); !os.IsNotExist(err) {
+		if !Confirm("the project %s already exists, are you sure you want to restore from a backup?", name) {
+			return nil
+		}
+	}
+	return bs.Backup(folder, repo)
 }
