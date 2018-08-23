@@ -3,6 +3,7 @@ package proj
 import (
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 
@@ -44,7 +45,7 @@ func (db *Dropbox) WalkDiffs(local, remote string, cb WalkDiffsCallback) error {
 
 	for _, ent := range folders.Entries {
 		if ent.Tag != "folder" {
-			remoteFiles[strings.Replace(ent.Name, remote, "", 1)] = ent
+			remoteFiles[strings.Replace(ent.PathDisplay, remote, "", 1)] = ent
 		}
 	}
 
@@ -151,11 +152,16 @@ func (db *Dropbox) HashLocal(file string) (hash string, err error) {
 	return dropbox.ContentHash(f)
 }
 
-func (db *Dropbox) Download(remote, local string) (err error) {
+func (db *Dropbox) Download(local, remote string) (err error) {
 	result, err := db.client.Files.Download(&dropbox.DownloadInput{
 		Path: remote,
 	})
 
+	if err != nil {
+		return
+	}
+
+	err = os.MkdirAll(path.Dir(local), 0775)
 	if err != nil {
 		return
 	}
