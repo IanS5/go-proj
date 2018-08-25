@@ -12,7 +12,7 @@ import (
 	"strings"
 	"syscall"
 
-	log "github.com/sirupsen/logrus"
+	"github.com/sirupsen/logrus"
 )
 
 const projectFolderPerm = 0775
@@ -81,24 +81,24 @@ func (fr *ProjectRepository) HistFile(name string) string {
 
 func (fr *ProjectRepository) Create(name string) (err error) {
 	folder := fr.Path(name)
-	log.Debugf("Creating \"%s\" at %s", name, folder)
+	logrus.Debugf("Creating \"%s\" at %s", name, folder)
 
 	if _, err := os.Stat(folder); !os.IsNotExist(err) {
 		if fr.interactive && !Confirm("%s already exists, overwrite it?", name) {
 			return nil
 		}
 
-		log.Debugf("Removing %s", folder)
+		logrus.Debugf("Removing %s", folder)
 		os.RemoveAll(folder)
 	}
 
-	log.Debugf("Making directory %s", folder)
+	logrus.Debugf("Making directory %s", folder)
 	return os.MkdirAll(folder, projectFolderPerm)
 }
 
 func (fr *ProjectRepository) Delete(name string) (err error) {
 	folder := fr.Path(name)
-	log.Debugf("Removing \"%s\" at %s", name, folder)
+	logrus.Debugf("Removing \"%s\" at %s", name, folder)
 
 	if fr.interactive && !Confirm("Are you sure you want to delete %s?", name) {
 		return nil
@@ -206,11 +206,11 @@ func (fr *ProjectRepository) Upload(name string, s StorageService) (err error) {
 			case DiffResultMismatch, DiffResultOnlyExistsLocal:
 				localFile := path.Join(folder, file)
 				remoteFile := path.Join(remoteFolder, file)
-				log.Debugf("(UPLOAD) %q -> %q", localFile, remoteFile)
+				logrus.Debugf("(UPLOAD) %q -> %q", localFile, remoteFile)
 				err = s.Upload(localFile, remoteFile)
 			case DiffResultOnlyExistsRemote:
 				remoteFile := path.Join(remoteFolder, file)
-				log.Debugf("(REMOVE) %q", remoteFile)
+				logrus.Debugf("(REMOVE) %q", remoteFile)
 				err = s.Delete(path.Join(remoteFolder, file))
 			}
 
@@ -232,11 +232,11 @@ func (fr *ProjectRepository) Pull(name string, s StorageService) (err error) {
 			case DiffResultMismatch, DiffResultOnlyExistsRemote:
 				localFile := path.Join(folder, file)
 				remoteFile := path.Join(remoteFolder, file)
-				log.Debugf("(DOWNLOAD) %q -> %q", remoteFile, localFile)
+				logrus.Debugf("(DOWNLOAD) %q -> %q", remoteFile, localFile)
 				err = s.Download(localFile, remoteFile)
 			case DiffResultOnlyExistsLocal:
 				localFile := path.Join(folder, file)
-				log.Debugf("(REMOVE) %q", localFile)
+				logrus.Debugf("(REMOVE) %q", localFile)
 				err = os.RemoveAll(localFile)
 			}
 

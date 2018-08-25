@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"fmt"
-	"log"
 	"os"
 	"strings"
 
@@ -49,7 +48,7 @@ func makeProjectAction(name string, description string, action func(repo *proj.P
 
 			err := action(proj.NewInteractiveLocal(repoPath), args[0])
 			if err != nil {
-				log.Fatal(err)
+				logrus.Fatal(err)
 			}
 		},
 	}

@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	log "github.com/sirupsen/logrus"
+	"github.com/sirupsen/logrus"
 	dropbox "github.com/tj/go-dropbox"
 )
 
@@ -62,7 +62,7 @@ func (db *Dropbox) WalkDiffs(local, remote string, cb WalkDiffsCallback) error {
 		if len(strippedFile) > 0 && strippedFile[0] == '/' || strippedFile[0] == '\\' {
 			strippedFile = strippedFile[1:]
 		}
-		log.Debugf("Comparing %q", strippedFile)
+		logrus.Debugf("Comparing %q", strippedFile)
 
 		if metadata, exists := remoteFiles[strippedFile]; !exists {
 			err = cb(strippedFile, DiffResultOnlyExistsLocal)
