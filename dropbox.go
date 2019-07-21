@@ -1,51 +1,64 @@
 package proj
 
 import (
+	"crypto/sha256"
+	"fmt"
 	"io"
 	"os"
 	"path"
 	"path/filepath"
 	"strings"
+	"time"
 
+	dropbox "github.com/dropbox/dropbox-sdk-go-unofficial/dropbox"
+	files "github.com/dropbox/dropbox-sdk-go-unofficial/dropbox/files"
+	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
-	dropbox "github.com/tj/go-dropbox"
+	// "github.com/tj/go-dropbox"
 )
 
 type Dropbox struct {
-	client        *dropbox.Client
+	client        files.Client
 	dropboxFolder string
 }
 
-func (db *Dropbox) WalkDiffs(local, remote string, cb WalkDiffsCallback) error {
-	folders, err := db.client.Files.ListFolder(&dropbox.ListFolderInput{
+func (db *Dropbox) WalkDiffs(local, remote string, skip SkipCallback, cb WalkDiffsCallback) error {
+	folders, err := db.client.ListFolder(&files.ListFolderArg{
 		Path:             remote,
-		Recursive:        true,
 		IncludeMediaInfo: false,
-		IncludeDeleted:   false,
-	})
+		Recursive:        true,
+		IncludeDeleted:   false})
 
+	var entList []files.IsMetadata
 	if err != nil {
+		if strings.HasPrefix(err.Error(), "path/not_found/") {
+			logrus.Info("hi")
+			entList = make([]files.IsMetadata, 0)
+			_, err = db.client.CreateFolderV2(files.NewCreateFolderArg(remote))
+		}
 
-		switch err.(type) {
-		case *dropbox.Error:
-			// 409 (Not found) is ok
-			if err.(*dropbox.Error).StatusCode != 409 {
-				return err
-			}
-		default:
+		if err != nil {
 			return err
 		}
-
-		folders = &dropbox.ListFolderOutput{
-			Entries: []*dropbox.Metadata{},
-		}
+	} else {
+		entList = folders.Entries
 	}
 
-	remoteFiles := make(map[string]*dropbox.Metadata, len(folders.Entries))
+	remoteFiles := make(map[string]*files.FileMetadata, len(entList))
 
-	for _, ent := range folders.Entries {
-		if ent.Tag != "folder" {
-			remoteFiles[strings.Replace(ent.PathDisplay, remote, "", 1)] = ent
+	for _, ent := range entList {
+
+		switch ent.(type) {
+		case *files.FileMetadata:
+			v := ent.(*files.FileMetadata)
+			strippedFile, err := filepath.Rel(remote, v.PathDisplay)
+			if err != nil {
+				return errors.WithMessage(err, "failed to make remote filepath relative")
+			}
+
+			remoteFiles[strippedFile] = v
+		default:
+			// skip everything but normal files
 		}
 	}
 
@@ -58,25 +71,36 @@ func (db *Dropbox) WalkDiffs(local, remote string, cb WalkDiffsCallback) error {
 			return nil
 		}
 
-		strippedFile := strings.Replace(file, local, "", 1)
-		if len(strippedFile) > 0 && strippedFile[0] == '/' || strippedFile[0] == '\\' {
-			strippedFile = strippedFile[1:]
+		strippedFile, err := filepath.Rel(local, file)
+		if err != nil {
+			return errors.WithMessage(err, "failed to make local filepath relative")
 		}
+
+		if skip != nil && skip(strippedFile, info) {
+			logrus.Debugf("Skipping %q", strippedFile)
+			return nil
+		}
+
 		logrus.Debugf("Comparing %q", strippedFile)
 
 		if metadata, exists := remoteFiles[strippedFile]; !exists {
 			err = cb(strippedFile, DiffResultOnlyExistsLocal)
 		} else {
-			hash, err := db.HashLocal(file)
-			if err != nil {
-				return err
-			}
-
-			if metadata.ContentHash != hash {
+			if metadata.Size != uint64(info.Size()) {
 				err = cb(strippedFile, DiffResultMismatch)
+			} else {
+				hash, err := db.HashLocal(file)
 				if err != nil {
 					return err
 				}
+
+				if metadata.ContentHash != hash {
+					err = cb(strippedFile, DiffResultMismatch)
+
+				}
+			}
+			if err != nil {
+				return err
 			}
 			delete(remoteFiles, strippedFile)
 		}
@@ -97,48 +121,109 @@ func (db *Dropbox) WalkDiffs(local, remote string, cb WalkDiffsCallback) error {
 	return err
 }
 
-func (db *Dropbox) Delete(file string) (err error) {
-	_, err = db.client.Files.Delete(&dropbox.DeleteInput{
-		Path: file,
-	})
+func (db *Dropbox) Delete(del []string) (err error) {
+	arg := files.DeleteBatchArg{
+		Entries: make([]*files.DeleteArg, len(del)),
+	}
+
+	for i, f := range del {
+		arg.Entries[i] = files.NewDeleteArg(f)
+	}
+
+	_, err = db.client.DeleteBatch(&arg)
 	return
 }
 
+const chunkSize int64 = 1 << 24
+
 func (db *Dropbox) Upload(local, remote string) (err error) {
+
 	f, err := os.Open(local)
 	if err != nil {
 		return err
 	}
 
 	defer f.Close()
-
-	_, err = db.client.Files.Upload(&dropbox.UploadInput{
-		Path:       remote,
-		Mode:       dropbox.WriteModeOverwrite,
-		AutoRename: false,
-		Mute:       true,
-		Reader:     f,
-	})
-
+	info, err := f.Stat()
 	if err != nil {
-		return
+		return err
+	}
+	size := info.Size()
+
+	commitInfo := files.NewCommitInfo(remote)
+	commitInfo.Mode.Tag = "overwrite"
+	commitInfo.ClientModified = time.Now().UTC().Round(time.Second)
+
+	if size > chunkSize {
+		res, err := db.client.UploadSessionStart(files.NewUploadSessionStartArg(),
+			&io.LimitedReader{R: f, N: chunkSize})
+		if err != nil {
+			return err
+		}
+
+		written := chunkSize
+
+		for (size - written) > chunkSize {
+			cursor := files.NewUploadSessionCursor(res.SessionId, uint64(written))
+			args := files.NewUploadSessionAppendArg(cursor)
+
+			err = db.client.UploadSessionAppendV2(args, &io.LimitedReader{R: f, N: chunkSize})
+			if err != nil {
+				return err
+			}
+			written += chunkSize
+		}
+
+		cursor := files.NewUploadSessionCursor(res.SessionId, uint64(written))
+		args := files.NewUploadSessionFinishArg(cursor, commitInfo)
+
+		if _, err = db.client.UploadSessionFinish(args, f); err != nil {
+			return err
+		}
+	} else {
+		if _, err = db.client.Upload(commitInfo, f); err != nil {
+			return err
+		}
 	}
 
 	return
 }
 
+const hashBlockSize = 4 * 1024 * 1024
+
+func ContentHash(r io.Reader) (string, error) {
+	buf := make([]byte, hashBlockSize)
+	resultHash := sha256.New()
+	n, err := r.Read(buf)
+	if err != nil && err != io.EOF {
+		return "", err
+	}
+	if n > 0 {
+		bufHash := sha256.Sum256(buf[:n])
+		resultHash.Write(bufHash[:])
+	}
+	for n == hashBlockSize && err == nil {
+		n, err = r.Read(buf)
+		if err != nil && err != io.EOF {
+			return "", err
+		}
+		if n > 0 {
+			bufHash := sha256.Sum256(buf[:n])
+			resultHash.Write(bufHash[:])
+		}
+	}
+	return fmt.Sprintf("%x", resultHash.Sum(nil)), nil
+}
+
 func (db *Dropbox) HashRemote(name string) (hash string, err error) {
-	metadata, err := db.client.Files.GetMetadata(
-		&dropbox.GetMetadataInput{
-			Path:             name,
-			IncludeMediaInfo: false,
-		})
+	metadata, err := db.client.GetMetadata(
+		files.NewGetMetadataArg(name))
 
 	if err != nil {
 		return
 	}
 
-	return metadata.ContentHash, err
+	return metadata.(*files.FileMetadata).ContentHash, err
 }
 
 func (db *Dropbox) HashLocal(file string) (hash string, err error) {
@@ -149,13 +234,11 @@ func (db *Dropbox) HashLocal(file string) (hash string, err error) {
 
 	defer f.Close()
 
-	return dropbox.ContentHash(f)
+	return ContentHash(f)
 }
 
 func (db *Dropbox) Download(local, remote string) (err error) {
-	result, err := db.client.Files.Download(&dropbox.DownloadInput{
-		Path: remote,
-	})
+	_, result, err := db.client.Download(files.NewDownloadArg(remote))
 
 	if err != nil {
 		return
@@ -171,12 +254,12 @@ func (db *Dropbox) Download(local, remote string) (err error) {
 		return
 	}
 
-	_, err = io.Copy(f, result.Body)
+	_, err = io.Copy(f, result)
 	return
 }
 
 func NewDropbox(token string) *Dropbox {
 	return &Dropbox{
-		client: dropbox.New(dropbox.NewConfig(token)),
+		client: files.New(dropbox.Config{Token: token}),
 	}
 }

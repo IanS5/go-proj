@@ -3,7 +3,6 @@ package proj
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"errors"
 	"io/ioutil"
 	"os"
 	"os/exec"
@@ -12,6 +11,8 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/pkg/errors"
+	gitignore "github.com/sabhiram/go-gitignore"
 	"github.com/sirupsen/logrus"
 )
 
@@ -198,24 +199,65 @@ func (fr *ProjectRepository) Upload(name string, s StorageService) (err error) {
 		return err
 	}
 
-	return s.WalkDiffs(folder, remoteFolder,
+	ignorePath := path.Join(folder, ".gitignore")
+	var ignore *gitignore.GitIgnore
+	if _, err := os.Stat(ignorePath); !os.IsNotExist(err) {
+		ignore, err = gitignore.CompileIgnoreFile(ignorePath)
+		if err != nil {
+			return errors.WithMessage(err, "while parsing gitignore")
+		}
+
+		logrus.Debugf("using gitignore file %s", ignorePath)
+	} else {
+		logrus.Debugf("gitignore (%s) not found", ignorePath)
+
+	}
+
+	deleteList := make([]string, 0, 32)
+	uploadList := make([]string, 0, 32)
+
+	err = s.WalkDiffs(folder, remoteFolder,
+		func(file string, info os.FileInfo) bool {
+			if ignore != nil {
+				return ignore.MatchesPath(file)
+			}
+
+			return false
+		},
 		func(file string, diff DiffResult) (err error) {
 			switch diff {
 			case DiffResultMatch:
 				// Do nothing
 			case DiffResultMismatch, DiffResultOnlyExistsLocal:
-				localFile := path.Join(folder, file)
-				remoteFile := path.Join(remoteFolder, file)
-				logrus.Debugf("(UPLOAD) %q -> %q", localFile, remoteFile)
-				err = s.Upload(localFile, remoteFile)
+				uploadList = append(uploadList, file)
 			case DiffResultOnlyExistsRemote:
-				remoteFile := path.Join(remoteFolder, file)
-				logrus.Debugf("(REMOVE) %q", remoteFile)
-				err = s.Delete(path.Join(remoteFolder, file))
+				deleteList = append(deleteList, file)
 			}
 
 			return
 		})
+
+	if err != nil {
+		return err
+	}
+
+	for i, file := range uploadList {
+		logrus.Infof("Uploading %.3d/%.3d ... %s", i+1, len(uploadList), file)
+		localFile := path.Join(folder, file)
+		remoteFile := path.Join(remoteFolder, file)
+		err = s.Upload(localFile, remoteFile)
+
+		if err != nil {
+			return err
+		}
+	}
+
+	if len(deleteList) > 0 {
+		logrus.Infof("Deleting %d files", len(deleteList))
+		s.Delete(deleteList)
+	}
+
+	return
 }
 
 func (fr *ProjectRepository) Pull(name string, s StorageService) (err error) {
@@ -225,6 +267,7 @@ func (fr *ProjectRepository) Pull(name string, s StorageService) (err error) {
 	os.MkdirAll(folder, projectFolderPerm)
 
 	return s.WalkDiffs(folder, remoteFolder,
+		nil,
 		func(file string, diff DiffResult) (err error) {
 			switch diff {
 			case DiffResultMatch:

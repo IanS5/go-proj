@@ -1,5 +1,7 @@
 package proj
 
+import "os"
+
 // DiffResult explains broadly explains the difference between the remote and local versions of a file
 type DiffResult uint8
 
@@ -20,10 +22,13 @@ const (
 // WalkDiffsCallback is the callback function type in StorageService.WalkDifs
 type WalkDiffsCallback func(string, DiffResult) error
 
+// SkipCallback gives the path and info of a local file, and should return true if that file is to be skipped in the walk
+type SkipCallback func(string, os.FileInfo) bool
+
 // StorageService is a application that allows users to store files remotely (e.g. Dropbox, Google Drive, Amazon S3)
 type StorageService interface {
 	// WalkDiffs walks through the differences between a local and remote directory, recursively
-	WalkDiffs(local, remote string, callback WalkDiffsCallback) error
+	WalkDiffs(local, remote string, skip SkipCallback, callback WalkDiffsCallback) error
 
 	// Upload uploads a local file, "local" to a remote file "remote"
 	Upload(local, remote string) error
@@ -32,5 +37,5 @@ type StorageService interface {
 	Download(local, remote string) error
 
 	// Delete removes a file from the storage service
-	Delete(remote string) error
+	Delete(remote []string) error
 }
