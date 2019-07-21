@@ -32,7 +32,6 @@ func (db *Dropbox) WalkDiffs(local, remote string, skip SkipCallback, cb WalkDif
 	var entList []files.IsMetadata
 	if err != nil {
 		if strings.HasPrefix(err.Error(), "path/not_found/") {
-			logrus.Info("hi")
 			entList = make([]files.IsMetadata, 0)
 			_, err = db.client.CreateFolderV2(files.NewCreateFolderArg(remote))
 		}
