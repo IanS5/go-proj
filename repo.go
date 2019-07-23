@@ -252,9 +252,15 @@ func (fr *ProjectRepository) Upload(name string, s StorageService) (err error) {
 		}
 	}
 
-	if len(deleteList) > 0 {
-		logrus.Infof("Deleting %d files", len(deleteList))
-		s.Delete(deleteList)
+
+	for i, file := range deleteList {
+		logrus.Infof("Uploading %.3d/%.3d ... %s", i+1, len(deleteList), file)
+		remoteFile := path.Join(remoteFolder, file)
+		err = s.Delete(remoteFile)
+
+		if err != nil {
+			return err
+		}
 	}
 
 	return

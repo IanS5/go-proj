@@ -120,16 +120,8 @@ func (db *Dropbox) WalkDiffs(local, remote string, skip SkipCallback, cb WalkDif
 	return err
 }
 
-func (db *Dropbox) Delete(del []string) (err error) {
-	arg := files.DeleteBatchArg{
-		Entries: make([]*files.DeleteArg, len(del)),
-	}
-
-	for i, f := range del {
-		arg.Entries[i] = files.NewDeleteArg(f)
-	}
-
-	_, err = db.client.DeleteBatch(&arg)
+func (db *Dropbox) Delete(f string) (err error) {
+	_, err = db.client.DeleteV2(files.NewDeleteArg(f))
 	return
 }
 

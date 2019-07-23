@@ -37,5 +37,5 @@ type StorageService interface {
 	Download(local, remote string) error
 
 	// Delete removes a file from the storage service
-	Delete(remote []string) error
+	Delete(remote string) error
 }
